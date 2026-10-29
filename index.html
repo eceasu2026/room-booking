@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conference Room Booking</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:640px;margin:0 auto;padding:16px;color:#222}
+  h1{font-size:1.3rem} h2{font-size:1.05rem;margin-top:24px}
+  label{font-size:.85rem;color:#555}
+  input,button{font:inherit;padding:8px;margin:4px 0;width:100%;box-sizing:border-box}
+  button{background:#1a5fb4;color:#fff;border:0;border-radius:6px;cursor:pointer}
+  button.grey{background:#666}
+  button.small{width:auto;background:#c01c28;padding:4px 10px;margin-top:6px}
+  .card{border:1px solid #ccc;border-radius:8px;padding:10px;margin:8px 0}
+  .msg{padding:8px;border-radius:6px;margin:8px 0}
+  .err{background:#fde0e0} .ok{background:#dff5e1}
+  .hide{display:none}
+  .row{display:flex;gap:8px}
+</style>
+</head>
+<body>
+<h1>Conference Room Booking</h1>
+<div id="msg"></div>
+
+<div id="login">
+  <input id="email" type="email" placeholder="Email">
+  <input id="pass" type="password" placeholder="Password (min 6 characters)">
+  <div class="row">
+    <button onclick="login()">Log in</button>
+    <button class="grey" onclick="signup()">Sign up</button>
+  </div>
+  <p style="font-size:.85rem;color:#555">First time? Ask the administrator to approve your email, then tap Sign up once.</p>
+</div>
+
+<div id="app" class="hide">
+  <div class="row">
+    <span id="who" style="flex:1;align-self:center"></span>
+    <button class="grey" style="width:auto" onclick="logout()">Log out</button>
+  </div>
+
+  <h2>Book the conference room</h2>
+  <label>Start</label><input id="start" type="datetime-local">
+  <label>End</label><input id="end" type="datetime-local">
+  <input id="purpose" placeholder="Purpose (optional)">
+  <button onclick="book()">Book</button>
+
+  <h2>Upcoming bookings</h2>
+  <div id="list"></div>
+
+  <div id="admin" class="hide">
+    <h2>Admin: approved users</h2>
+    <input id="newName" placeholder="Name / department">
+    <input id="newEmail" type="email" placeholder="Email">
+    <button onclick="addUser()">Add user</button>
+    <div id="users"></div>
+  </div>
+</div>
+
+<script>
+// Paste your Supabase values here (Project Settings -> API)
+const SUPABASE_URL = "https://hkayfyixzlzljstanlup.supabase.co";
+const SUPABASE_KEY = "sb_publishable_9-IQl6t4Frz610WFoF8t6w_DbTkT0Op";
+
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const $ = id => document.getElementById(id);
+let me = null, myRow = null;
+
+function show(text, ok){
+  const m = $("msg");
+  m.className = "msg " + (ok ? "ok" : "err");
+  m.textContent = text;
+}
+
+async function login(){
+  const { error } = await db.auth.signInWithPassword({ email: $("email").value.trim(), password: $("pass").value });
+  if (error) return show(error.message);
+  init();
+}
+async function signup(){
+  const { error } = await db.auth.signUp({ email: $("email").value.trim(), password: $("pass").value });
+  if (error) return show(error.message);
+  show("Account created. Now tap Log in. (If it asks for email confirmation, check your inbox first.)", true);
+}
+async function logout(){ await db.auth.signOut(); location.reload(); }
+
+async function init(){
+  const { data } = await db.auth.getUser();
+  if (!data.user) return;
+  me = data.user;
+  const r = await db.from("allowed_users").select("*").ilike("email", me.email);
+  myRow = r.data && r.data[0];
+  if (!myRow) {
+    await db.auth.signOut();
+    return show("Your email is not approved yet. Please ask the administrator.");
+  }
+  $("login").classList.add("hide");
+  $("app").classList.remove("hide");
+  $("msg").className = ""; $("msg").textContent = "";
+  $("who").textContent = myRow.name + (myRow.is_admin ? " (admin)" : "");
+  if (myRow.is_admin) { $("admin").classList.remove("hide"); loadUsers(); }
+  load();
+}
+
+async function book(){
+  if (!$("start").value || !$("end").value) return show("Choose start and end time.");
+  const start = new Date($("start").value), end = new Date($("end").value);
+  if (end <= start) return show("End time must be after start time.");
+  if (end < new Date()) return show("That time is in the past.");
+  const { error } = await db.from("bookings").insert({
+    purpose: $("purpose").value.trim() || null,
+    start_time: start.toISOString(), end_time: end.toISOString()
+  });
+  if (error) {
+    return show(error.code === "23P01"
+      ? "Sorry, that time is already booked by someone else."
+      : error.message);
+  }
+  show("Booked.", true);
+  $("purpose").value = "";
+  load();
+}
+
+async function cancel(id){
+  if (!confirm("Cancel this booking?")) return;
+  const { error } = await db.from("bookings").delete().eq("id", id);
+  if (error) return show(error.message);
+  load();
+}
+
+async function load(){
+  const { data, error } = await db.from("bookings").select("*")
+    .gte("end_time", new Date().toISOString()).order("start_time");
+  if (error) return show(error.message);
+  const list = $("list");
+  list.innerHTML = "";
+  if (!data.length) list.textContent = "No upcoming bookings.";
+  data.forEach(b => {
+    const div = document.createElement("div");
+    div.className = "card";
+    const s = new Date(b.start_time), e = new Date(b.end_time);
+    const day = s.toDateString() === e.toDateString();
+    const t1 = s.toLocaleString([], {dateStyle:"medium", timeStyle:"short"});
+    const t2 = day ? e.toLocaleTimeString([], {timeStyle:"short"})
+                   : e.toLocaleString([], {dateStyle:"medium", timeStyle:"short"});
+    div.textContent = t1 + " to " + t2 + "\n" + b.booked_by + (b.purpose ? " - " + b.purpose : "");
+    div.style.whiteSpace = "pre-line";
+    if (b.created_by === me.id || myRow.is_admin) {
+      const btn = document.createElement("button");
+      btn.className = "small"; btn.textContent = "Cancel";
+      btn.onclick = () => cancel(b.id);
+      div.appendChild(document.createElement("br")); div.appendChild(btn);
+    }
+    list.appendChild(div);
+  });
+}
+
+async function loadUsers(){
+  const { data, error } = await db.from("allowed_users").select("*").order("name");
+  if (error) return show(error.message);
+  const box = $("users");
+  box.innerHTML = "";
+  data.forEach(u => {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.textContent = u.name + " - " + u.email + (u.is_admin ? " (admin)" : "");
+    if (u.email.toLowerCase() !== me.email.toLowerCase()) {
+      const btn = document.createElement("button");
+      btn.className = "small"; btn.textContent = "Remove";
+      btn.onclick = async () => {
+        if (!confirm("Remove " + u.name + "?")) return;
+        const r = await db.from("allowed_users").delete().eq("email", u.email);
+        if (r.error) show(r.error.message); else loadUsers();
+      };
+      div.appendChild(document.createElement("br")); div.appendChild(btn);
+    }
+    box.appendChild(div);
+  });
+}
+
+async function addUser(){
+  const name = $("newName").value.trim(), email = $("newEmail").value.trim().toLowerCase();
+  if (!name || !email) return show("Enter name and email.");
+  const { error } = await db.from("allowed_users").insert({ name, email });
+  if (error) return show(error.message);
+  $("newName").value = ""; $("newEmail").value = "";
+  show("User approved. Ask them to open the link and tap Sign up with that email.", true);
+  loadUsers();
+}
+
+init();
+</script>
+</body>
+</html>
